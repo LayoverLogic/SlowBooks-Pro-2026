@@ -51,6 +51,11 @@ class AccountCreate(BaseModel):
     account_kind: Optional[str] = None
     update_strategy: Optional[str] = None
     currency: Optional[str] = None
+    # Reserve Floor / Safe-to-Spend follow-up: explicit opt-in flag for the
+    # accounts the Safe-to-Spend calc sums over. Defaults false at the DB
+    # level — sweeping every asset account in would include savings,
+    # retirement etc and produce a misleading headline.
+    is_spendable: Optional[bool] = None
 
     _coerce_account_number = field_validator(
         "account_number", mode="before"
@@ -91,6 +96,7 @@ class AccountUpdate(BaseModel):
     account_kind: Optional[str] = None
     update_strategy: Optional[str] = None
     currency: Optional[str] = None
+    is_spendable: Optional[bool] = None
 
     _coerce_account_number = field_validator(
         "account_number", mode="before"
@@ -189,6 +195,10 @@ class AccountResponse(BaseModel):
     account_kind: Optional[str] = None
     update_strategy: Optional[str] = None
     currency: str = "USD"
+    # Reserve Floor / Safe-to-Spend: which accounts the dashboard's
+    # Safe-to-Spend calc sums. Default false at the DB level so existing
+    # accounts opt in deliberately.
+    is_spendable: bool = False
     # DEPRECATED phase 1.5 — kept in the response so existing UI / tests
     # that read these fields keep working through the dual-write window.
     alex_pct: int = 0

@@ -547,6 +547,15 @@ const App = {
             perPaycheckHtml = await BudgetingDashboard.renderPerPaycheckPlan();
         } catch (e) { /* budgeting endpoint not present yet — silent fallback */ }
 
+        // Safe-to-Spend headline (Reserve Floor follow-up). Always rendered
+        // when the endpoint is reachable so a freshly-seeded household sees
+        // the empty-state nudge to flag a spendable account; once a flag is
+        // set, the headline takes over.
+        let safeToSpendHtml = '';
+        try {
+            safeToSpendHtml = await BudgetingDashboard.renderSafeToSpend();
+        } catch (e) { /* endpoint not present yet — silent fallback */ }
+
         return `
             <div class="page-header">
                 <h2>Bookkeeping</h2>
@@ -580,6 +589,8 @@ const App = {
             </div>
 
             ${chartsHtml}
+
+            ${safeToSpendHtml}
 
             ${perPaycheckHtml}
 
@@ -822,6 +833,13 @@ const App = {
                         </select></div>
                     <div class="form-group"><label>Currency</label>
                         <input name="currency" maxlength="3" style="text-transform:uppercase;" value="${escapeHtml((acct.currency || 'USD').toUpperCase())}"></div>
+                    <div class="form-group"><label>Spendable</label>
+                        <div style="display:flex; align-items:center; gap:6px; padding-top:4px;">
+                            <input type="checkbox" name="is_spendable" id="acct-spendable" ${acct.is_spendable ? 'checked' : ''}>
+                            <label for="acct-spendable" style="font-size:11px; color:var(--text-muted); font-weight:normal; margin:0;">
+                                Include in Safe-to-Spend
+                            </label>
+                        </div></div>
                     <div class="form-group full-width"><label>Description</label>
                         <textarea name="description">${escapeHtml(acct.description || '')}</textarea></div>
                 </div>
@@ -1003,6 +1021,11 @@ const App = {
             if (raw[k] === '') raw[k] = null;
         }
         if (raw.currency) raw.currency = raw.currency.toUpperCase();
+
+        // Checkbox → bool. Unchecked inputs aren't in FormData at all, so
+        // an absent key means false. Explicit translation keeps the column
+        // diff clean (no string "on" landing on a Boolean DB column).
+        raw.is_spendable = 'is_spendable' in raw;
 
         try {
             let savedAccount;

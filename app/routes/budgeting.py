@@ -8,19 +8,24 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models.accounts import Account
+from app.models.balance_snapshots import BalanceSnapshot
 from app.models.budgeting import Goal, PaySource, SinkingFund
 from app.schemas.budgeting import (
     GoalCreate, GoalResponse, GoalUpdate,
     PaySourceCreate, PaySourceResponse, PaySourceUpdate,
     PerCheckLineResponse, PerCheckPlanResponse,
+    SafeToSpendResponse,
     SinkingFundCreate, SinkingFundResponse, SinkingFundUpdate,
 )
 from app.services.budget_calc import (
     _monthly_required_exact,
     build_per_paycheck_plan,
+    build_safe_to_spend,
     monthly_accrual,
     monthly_required,
     months_until,
@@ -86,11 +91,17 @@ sinking_funds_router = APIRouter(prefix="/api/sinking-funds", tags=["budgeting"]
 
 
 def _fund_to_response(fund: SinkingFund) -> SinkingFundResponse:
-    """Serialize a fund including its derived `monthly_accrual`."""
+    """Serialize a fund including its derived `monthly_accrual`.
+
+    Reserves always report monthly_accrual=0 — they're floors, not accrual
+    envelopes. `monthly_accrual()` already handles that path safely (returns
+    0 when fund_type='reserve' or bill_periods_per_year is None).
+    """
     return SinkingFundResponse(
         id=fund.id,
         name=fund.name,
         amount=fund.amount,
+        fund_type=fund.fund_type,
         bill_periods_per_year=fund.bill_periods_per_year,
         next_due=fund.next_due,
         current_balance=fund.current_balance,
@@ -124,7 +135,33 @@ def update_sinking_fund(fund_id: int, data: SinkingFundUpdate,
     row = db.query(SinkingFund).filter(SinkingFund.id == fund_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail="Sinking fund not found")
-    for k, v in data.model_dump(exclude_unset=True).items():
+
+    payload = data.model_dump(exclude_unset=True)
+
+    # Discriminator transitions need to keep bill_periods_per_year and
+    # funding_source_id consistent with the new fund_type before commit
+    # — otherwise the DB-level CHECK rejects with an opaque integrity
+    # error. The Pydantic validator on SinkingFundUpdate only sees what
+    # the caller sent; this handler is what makes a fund_type-only PATCH
+    # work without forcing the caller to also send the other two fields.
+    if "fund_type" in payload:
+        new_type = payload["fund_type"]
+        if new_type == "reserve":
+            # A reserve fund has no accrual cadence and no funding source.
+            payload.setdefault("bill_periods_per_year", None)
+            payload.setdefault("funding_source_id", None)
+        elif new_type == "accrual":
+            # Going accrual REQUIRES bill_periods_per_year. The caller must
+            # have supplied it on this PATCH or the row must already have one.
+            effective = payload.get("bill_periods_per_year", row.bill_periods_per_year)
+            if effective is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="accrual funds require bill_periods_per_year "
+                           "(1, 2, 4, or 12)",
+                )
+
+    for k, v in payload.items():
         setattr(row, k, v)
     db.commit()
     db.refresh(row)
@@ -246,7 +283,8 @@ def per_paycheck_plan(db: Session = Depends(get_db)):
     """Per pay_source: monthly total + per-check total + the item breakdown.
 
     Items without a `funding_source_id` are excluded from the plan
-    (unassigned).
+    (unassigned). Reserve funds are also excluded (they're floors, not
+    accrual envelopes).
     """
     sources = db.query(PaySource).all()
     funds = db.query(SinkingFund).all()
@@ -270,3 +308,51 @@ def per_paycheck_plan(db: Session = Depends(get_db)):
         )
         for p in plans
     ]
+
+
+def _latest_snapshot_by_account_id(db: Session) -> dict[int, Decimal]:
+    """{account_id: latest snapshot balance}. Mirrors the helper in
+    app/routes/net_worth.py but local — keeps Safe-to-Spend's DB shape
+    self-contained instead of cross-importing across route modules."""
+    latest_dates = (
+        db.query(
+            BalanceSnapshot.account_id.label("aid"),
+            func.max(BalanceSnapshot.as_of_date).label("max_date"),
+        )
+        .group_by(BalanceSnapshot.account_id)
+        .subquery()
+    )
+    rows = (
+        db.query(BalanceSnapshot.account_id, BalanceSnapshot.balance)
+        .join(latest_dates, and_(
+            BalanceSnapshot.account_id == latest_dates.c.aid,
+            BalanceSnapshot.as_of_date == latest_dates.c.max_date,
+        ))
+        .all()
+    )
+    return {aid: Decimal(bal) for aid, bal in rows}
+
+
+@plan_router.get("/safe-to-spend", response_model=SafeToSpendResponse)
+def safe_to_spend(db: Session = Depends(get_db)):
+    """How much is left to actually spend right now.
+
+    See app.services.budget_calc.build_safe_to_spend for the formula. This
+    handler is plumbing: load the inputs, hand off to the calc, return.
+    """
+    accounts = db.query(Account).filter(Account.is_active == True).all()
+    funds = db.query(SinkingFund).all()
+    goals = db.query(Goal).all()
+    snapshots = _latest_snapshot_by_account_id(db)
+
+    breakdown = build_safe_to_spend(accounts, funds, goals, snapshots)
+
+    return SafeToSpendResponse(
+        spendable_balance=breakdown.spendable_balance,
+        accrual_allocated=breakdown.accrual_allocated,
+        goals_allocated=breakdown.goals_allocated,
+        reserve_target=breakdown.reserve_target,
+        safe_to_spend=breakdown.safe_to_spend,
+        spendable_account_ids=breakdown.spendable_account_ids,
+        spendable_source=breakdown.spendable_source,
+    )
