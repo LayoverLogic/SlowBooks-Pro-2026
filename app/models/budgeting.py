@@ -72,30 +72,67 @@ class PaySource(Base):
                         onupdate=func.now(), nullable=False)
 
 
+class FundType(str, enum.Enum):
+    """Discriminator on `sinking_funds` (Reserve Floor + Safe-to-Spend
+    follow-up). Stored as the lowercase string value (matches the CHECK
+    constraint + the API's `Literal` type), same convention as PayCadence."""
+    ACCRUAL = "accrual"   # accrues toward `next_due` via bill_periods_per_year
+    RESERVE = "reserve"   # holds a target floor; no due date, no accrual cadence
+
+
 class SinkingFund(Base):
-    """A recurring/lumpy bill we pre-fund a little each month.
+    """A pre-funded bill envelope OR a maintained cash floor (reserve).
 
-    `amount` is the per-occurrence bill (e.g. $374 once a year). Combined
-    with `bill_periods_per_year` (1=annual, 2=semiannual, 4=quarterly,
-    12=monthly), the calc layer derives the monthly accrual:
+    `fund_type='accrual'` (default — existing rows): accrues toward a
+    recurring bill. `amount` is the per-occurrence bill; combined with
+    `bill_periods_per_year` (1=annual, 2=semiannual, 4=quarterly, 12=monthly)
+    the calc layer derives the monthly accrual:
         monthly_accrual = amount * bill_periods_per_year / 12
+    Funded from a `funding_source_id` (pay source); contributes to that
+    earner's per-paycheck plan.
 
-    `current_balance` is the VIRTUAL envelope balance — money notionally set
-    aside, held inside the real `linked_account_id` account along with other
-    envelopes. `funding_source_id` says which pay stream funds it.
+    `fund_type='reserve'`: a maintained cash floor (e.g. a $3,000 cushion).
+    `amount` is the TARGET floor; `bill_periods_per_year`, `next_due`, and
+    `funding_source_id` are all NULL/ignored (filled from lump deposits
+    when money lands, not from a paycheck stream). EXCLUDED from the
+    per-paycheck plan. Subtracted from Safe-to-Spend at the TARGET, not at
+    `current_balance` — so an unfunded cushion behaves honestly (pulls the
+    Safe-to-Spend headline down by the full target until it's filled).
+
+    `current_balance` is the VIRTUAL envelope balance in both cases —
+    money notionally set aside, held inside the real `linked_account_id`
+    account along with other envelopes.
     """
     __tablename__ = "sinking_funds"
     __table_args__ = (
+        # bill_periods_per_year is NULL for reserves and one of the four
+        # valid cadence values for accrual rows. Existing rows pre-fund-type
+        # all have a non-NULL value, so dropping the NOT NULL is safe.
         CheckConstraint(
-            "bill_periods_per_year IN (1, 2, 4, 12)",
+            "bill_periods_per_year IS NULL "
+            "OR bill_periods_per_year IN (1, 2, 4, 12)",
             name="ck_sinking_funds_bill_periods_values",
+        ),
+        CheckConstraint(
+            "fund_type IN ('accrual', 'reserve')",
+            name="ck_sinking_funds_fund_type_values",
+        ),
+        # An accrual fund must have bill_periods_per_year; a reserve fund
+        # must NOT. This is the discriminator's hard invariant — Pydantic
+        # also enforces it but the CHECK is the safety net for direct DB
+        # writes or seeds.
+        CheckConstraint(
+            "(fund_type = 'accrual' AND bill_periods_per_year IS NOT NULL) "
+            "OR (fund_type = 'reserve' AND bill_periods_per_year IS NULL)",
+            name="ck_sinking_funds_type_periods_consistent",
         ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(120), nullable=False)
     amount = Column(Numeric(12, 2), nullable=False)
-    bill_periods_per_year = Column(Integer, nullable=False)
+    # Reserve rows: NULL. Accrual rows: one of (1, 2, 4, 12).
+    bill_periods_per_year = Column(Integer, nullable=True)
     next_due = Column(Date, nullable=True)
     current_balance = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
     linked_account_id = Column(
@@ -107,6 +144,12 @@ class SinkingFund(Base):
         nullable=True, index=True,
     )
     currency = Column(String(3), nullable=False, default="USD", server_default="USD")
+    # Discriminator: 'accrual' (default — existing behaviour) or 'reserve'
+    # (maintained floor; see class docstring). Stored as lowercase String
+    # matching the CHECK + the API Literal, same convention as cadence.
+    fund_type = Column(
+        String(20), nullable=False, default="accrual", server_default="accrual",
+    )
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(),

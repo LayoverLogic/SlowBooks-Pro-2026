@@ -327,10 +327,14 @@ const SinkingFundsPage = {
         this._sources = sources;
         this._accounts = accounts;
 
-        const monthly = funds.filter(f => f.bill_periods_per_year === 12);
-        const periodic = funds.filter(f => f.bill_periods_per_year !== 12);
+        // Reserves are floors (no accrual cadence). Accrual envelopes split
+        // further into monthly (resets each cycle) vs periodic (climbs).
+        const reserves = funds.filter(f => f.fund_type === 'reserve');
+        const accrual = funds.filter(f => f.fund_type !== 'reserve');
+        const monthly = accrual.filter(f => f.bill_periods_per_year === 12);
+        const periodic = accrual.filter(f => f.bill_periods_per_year !== 12);
 
-        const renderRow = (f) => {
+        const renderAccrualRow = (f) => {
             const source = sources.find(s => s.id === f.funding_source_id);
             const sourceLabel = source ? source.name : '—';
             const fillPct = f.amount > 0
@@ -367,11 +371,62 @@ const SinkingFundsPage = {
                 </div>`;
         };
 
+        // Reserve tile is visually distinct from accrual envelopes: no
+        // "next bill" framing, "Cushion" label, and the headline reads
+        // "$X / $TARGET" so an unfunded floor is obvious at a glance.
+        // Below-target funds get a red accent on the progress bar — that's
+        // the Safe-to-Spend story made tangible.
+        const renderReserveRow = (f) => {
+            const target = Number(f.amount) || 0;
+            const balance = Number(f.current_balance) || 0;
+            const pct = target > 0 ? Math.min(100, (balance / target) * 100) : 0;
+            const underBy = target - balance;
+            const accent = balance >= target ? 'var(--positive)' : 'var(--qb-red)';
+            const statusLine = balance >= target
+                ? `<span style="color:var(--positive);">Cushion at target</span>`
+                : `<span style="color:var(--qb-red);">Below cushion by ${_BudgetingHelpers._money(underBy, f.currency)}</span>`;
+            return `
+                <div class="card" style="display:flex; flex-direction:column; gap:8px; border-left:3px solid ${accent};">
+                    <div style="display:flex; justify-content:space-between; align-items:start;">
+                        <div>
+                            <div style="font-weight:700; font-size:14px;">${escapeHtml(f.name)}</div>
+                            <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em;">
+                                Reserve floor
+                            </div>
+                        </div>
+                        <span style="font-size:11px; color:var(--text-muted);">
+                            Subtracted from Safe-to-Spend at target
+                        </span>
+                    </div>
+                    <div>
+                        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:4px; font-weight:600;">
+                            <span>${_BudgetingHelpers._money(balance, f.currency)} / ${_BudgetingHelpers._money(target, f.currency)}</span>
+                            <span style="color:var(--text-muted); font-size:11px;">${pct.toFixed(0)}%</span>
+                        </div>
+                        ${_BudgetingHelpers._progressBar(pct, accent)}
+                    </div>
+                    <div style="font-size:11px;">${statusLine}</div>
+                    <div style="display:flex; gap:6px; margin-top:4px;">
+                        <button class="btn btn-sm btn-secondary" onclick="SinkingFundsPage.edit(${f.id})">Edit</button>
+                        <button class="btn btn-sm btn-secondary" onclick="SinkingFundsPage.del(${f.id}, '${escapeJs(f.name)}')">Delete</button>
+                    </div>
+                </div>`;
+        };
+
+        const reservesHtml = reserves.length
+            ? `<div class="dashboard-section">
+                <h3>Reserves <span style="font-size:11px; color:var(--text-muted); font-weight:normal;">(maintained cash floors — pull Safe-to-Spend down by the full target until filled)</span></h3>
+                <div class="card-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:12px;">
+                    ${reserves.map(renderReserveRow).join('')}
+                </div>
+            </div>`
+            : '';
+
         const periodicHtml = periodic.length
             ? `<div class="dashboard-section">
                 <h3>Periodic Envelopes <span style="font-size:11px; color:var(--text-muted); font-weight:normal;">(annual / semiannual / quarterly — balance climbs toward next bill)</span></h3>
                 <div class="card-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:12px;">
-                    ${periodic.map(renderRow).join('')}
+                    ${periodic.map(renderAccrualRow).join('')}
                 </div>
             </div>`
             : '';
@@ -380,13 +435,13 @@ const SinkingFundsPage = {
             ? `<div class="dashboard-section">
                 <h3>Monthly Envelopes <span style="font-size:11px; color:var(--text-muted); font-weight:normal;">(reset each cycle — current_balance shows what's available right now)</span></h3>
                 <div class="card-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:12px;">
-                    ${monthly.map(renderRow).join('')}
+                    ${monthly.map(renderAccrualRow).join('')}
                 </div>
             </div>`
             : '';
 
-        const emptyHtml = (!periodic.length && !monthly.length)
-            ? `<div class="empty-state"><p>No sinking funds yet. Add a recurring bill (e.g. car insurance, phone) to pre-fund.</p></div>`
+        const emptyHtml = (!periodic.length && !monthly.length && !reserves.length)
+            ? `<div class="empty-state"><p>No sinking funds yet. Add a recurring bill (e.g. car insurance, phone) to pre-fund, or a reserve cushion.</p></div>`
             : '';
 
         return `
@@ -394,16 +449,18 @@ const SinkingFundsPage = {
                 <h2>Sinking Funds</h2>
                 <div class="btn-group">
                     <button class="btn btn-secondary" onclick="App.navigate('#/goals')">Goals</button>
+                    <button class="btn btn-secondary" onclick="SinkingFundsPage.addReserve()">+ New reserve</button>
                     <button class="btn btn-primary" onclick="SinkingFundsPage.addNew()">+ New fund</button>
                 </div>
             </div>
+            ${reservesHtml}
             ${periodicHtml}
             ${monthlyHtml}
             ${emptyHtml}
         `;
     },
 
-    _formHtml(f) {
+    _accrualFormHtml(f) {
         const sources = this._sources || [];
         const accounts = (this._accounts || []).filter(
             a => a.account_type === 'asset' && a.is_active
@@ -436,10 +493,59 @@ const SinkingFundsPage = {
             </div>`;
     },
 
+    // Reserve form is intentionally narrower: no frequency, no funding
+    // source, no next-due. A reserve is "what's the floor I want, and
+    // where do I park it?"
+    _reserveFormHtml(f) {
+        const accounts = (this._accounts || []).filter(
+            a => a.account_type === 'asset' && a.is_active
+        );
+        const acctOpts = accounts.map(a =>
+            `<option value="${a.id}" ${f && f.linked_account_id === a.id ? 'selected' : ''}>${escapeHtml(a.name)}</option>`
+        ).join('');
+        return `
+            <div class="form-grid">
+                <div class="form-group"><label>Name *</label>
+                    <input name="name" required value="${f ? escapeHtml(f.name) : ''}"
+                           placeholder="e.g. Cushion"></div>
+                <div class="form-group"><label>Target floor *</label>
+                    <input name="amount" type="number" step="0.01" required value="${f ? f.amount : ''}"
+                           placeholder="e.g. 3000.00"></div>
+                <div class="form-group"><label>Current balance</label>
+                    <input name="current_balance" type="number" step="0.01" value="${f ? f.current_balance : '0'}"></div>
+                <div class="form-group"><label>Holding account</label>
+                    <select name="linked_account_id"><option value="">—</option>${acctOpts}</select></div>
+            </div>
+            <div style="font-size:11px; color:var(--text-muted); margin-top:8px;">
+                Reserves pull Safe-to-Spend down by the full target amount until
+                they're filled. No accrual cadence, no paycheck assignment —
+                you top them up from lump deposits when money lands.
+            </div>`;
+    },
+
+    _formHtml(f) {
+        // Edit dispatch: reserve rows use the narrower form so the user
+        // can't accidentally re-introduce a cadence/funding-source.
+        return (f && f.fund_type === 'reserve')
+            ? this._reserveFormHtml(f)
+            : this._accrualFormHtml(f);
+    },
+
     addNew() {
         openModal('New Sinking Fund', `
             <form onsubmit="SinkingFundsPage.save(event)">
-                ${this._formHtml(null)}
+                ${this._accrualFormHtml(null)}
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </div>
+            </form>`);
+    },
+
+    addReserve() {
+        openModal('New Reserve', `
+            <form onsubmit="SinkingFundsPage.saveReserve(event)">
+                ${this._reserveFormHtml(null)}
                 <div class="form-actions">
                     <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
                     <button type="submit" class="btn btn-primary">Save</button>
@@ -451,8 +557,11 @@ const SinkingFundsPage = {
         const funds = await API.get('/sinking-funds');
         const f = funds.find(x => x.id === id);
         if (!f) return;
-        openModal('Edit Sinking Fund', `
-            <form onsubmit="SinkingFundsPage.save(event, ${id})">
+        const isReserve = f.fund_type === 'reserve';
+        const title = isReserve ? 'Edit Reserve' : 'Edit Sinking Fund';
+        const handler = isReserve ? 'SinkingFundsPage.saveReserve' : 'SinkingFundsPage.save';
+        openModal(title, `
+            <form onsubmit="${handler}(event, ${id})">
                 ${this._formHtml(f)}
                 <div class="form-actions">
                     <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
@@ -467,6 +576,7 @@ const SinkingFundsPage = {
         const data = {
             name: f.name.value,
             amount: f.amount.value,
+            fund_type: 'accrual',
             bill_periods_per_year: parseInt(f.bill_periods_per_year.value),
             next_due: f.next_due.value || null,
             current_balance: f.current_balance.value || '0',
@@ -477,6 +587,30 @@ const SinkingFundsPage = {
             if (id) await API.patch(`/sinking-funds/${id}`, data);
             else    await API.post('/sinking-funds', data);
             toast(id ? 'Fund updated' : 'Fund created');
+            closeModal();
+            App.navigate('#/sinking-funds');
+        } catch (err) { toast(err.message, 'error'); }
+    },
+
+    async saveReserve(e, id) {
+        e.preventDefault();
+        const f = e.target;
+        // Reserve payloads explicitly null the accrual-only fields so a
+        // PATCH that switches accrual→reserve clears them at the route
+        // level (the handler also defends against this — belt + braces).
+        const data = {
+            name: f.name.value,
+            amount: f.amount.value,
+            fund_type: 'reserve',
+            bill_periods_per_year: null,
+            funding_source_id: null,
+            current_balance: f.current_balance.value || '0',
+            linked_account_id: f.linked_account_id.value ? parseInt(f.linked_account_id.value) : null,
+        };
+        try {
+            if (id) await API.patch(`/sinking-funds/${id}`, data);
+            else    await API.post('/sinking-funds', data);
+            toast(id ? 'Reserve updated' : 'Reserve created');
             closeModal();
             App.navigate('#/sinking-funds');
         } catch (err) { toast(err.message, 'error'); }
@@ -568,6 +702,97 @@ const BudgetingDashboard = {
                 </h3>
                 <div class="card-grid" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:12px;">
                     ${cards}
+                </div>
+            </div>`;
+    },
+
+    /**
+     * Safe-to-Spend headline widget for the dashboard.
+     *
+     * Headline reads positive (green) or negative ("Below cushion by $X" in
+     * red). The breakdown is in a <details> so it doesn't push the rest of
+     * the dashboard down by default — readers can expand to see each
+     * subtraction (envelopes, goals, reserve target).
+     *
+     * If the spendable set can't be resolved (no flag set + no envelopes
+     * linked to anything), shows an empty-state nudge to flip the flag
+     * rather than a meaningless $0.
+     */
+    async renderSafeToSpend() {
+        let body;
+        try {
+            body = await API.get('/budget/safe-to-spend');
+        } catch (e) { return ''; }
+        if (!body) return '';
+
+        if (body.spendable_source === 'none') {
+            return `
+                <div class="dashboard-section">
+                    <h3>Safe to Spend</h3>
+                    <div class="card" style="padding:16px;">
+                        <div style="color:var(--text-muted); font-size:12px;">
+                            No spendable account configured yet. Open an account
+                            from <a href="#/accounts">Chart of Accounts</a> and
+                            flag it spendable, or link an envelope to your
+                            checking account to bootstrap the default set.
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        const safe = Number(body.safe_to_spend);
+        const isNegative = safe < 0;
+        const headlineColor = isNegative ? 'var(--qb-red)' : 'var(--positive)';
+        const headlineLabel = isNegative
+            ? `Below cushion by ${_BudgetingHelpers._money(Math.abs(safe))}`
+            : `${_BudgetingHelpers._money(safe)} safe to spend`;
+
+        const sourceTag = body.spendable_source === 'fallback'
+            ? `<span style="font-size:10px; color:var(--text-muted); margin-left:8px;">(auto-detected — flag accounts spendable for an explicit set)</span>`
+            : '';
+
+        // Breakdown rows. Reserve subtracts TARGET — explicitly labelled
+        // so a user wondering "but the cushion has money in it" can see why.
+        const rows = [
+            ['Spendable balance', body.spendable_balance, '+'],
+            ['− Envelopes set aside', body.accrual_allocated, '−'],
+            ['− Goals set aside', body.goals_allocated, '−'],
+            ['− Reserve target', body.reserve_target, '−'],
+        ].map(([label, val, sign]) => `
+            <tr>
+                <td>${label}</td>
+                <td class="amount" style="color:${sign === '−' ? 'var(--qb-red)' : 'var(--ink)'};">
+                    ${sign === '−' && Number(val) > 0 ? '−' : ''}${_BudgetingHelpers._money(val)}
+                </td>
+            </tr>`).join('');
+
+        return `
+            <div class="dashboard-section">
+                <h3>Safe to Spend ${sourceTag}</h3>
+                <div class="card" style="padding:16px;">
+                    <div style="font-size:24px; font-weight:700; color:${headlineColor};">
+                        ${headlineLabel}
+                    </div>
+                    <details style="margin-top:12px;">
+                        <summary style="cursor:pointer; font-size:11px; color:var(--qb-navy); user-select:none;">
+                            How we got here
+                        </summary>
+                        <div class="table-container" style="margin-top:8px;">
+                            <table style="font-size:12px;">
+                                <tbody>${rows}</tbody>
+                                <tfoot><tr style="font-weight:700; border-top:1px solid var(--rule);">
+                                    <td>Safe to spend</td>
+                                    <td class="amount" style="color:${headlineColor};">
+                                        ${_BudgetingHelpers._money(safe)}
+                                    </td>
+                                </tr></tfoot>
+                            </table>
+                        </div>
+                        <div style="font-size:10px; color:var(--text-muted); margin-top:6px;">
+                            Reserves subtract their TARGET, not their current balance — a
+                            cushion is locked even when funded.
+                        </div>
+                    </details>
                 </div>
             </div>`;
     },

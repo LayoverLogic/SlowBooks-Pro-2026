@@ -68,6 +68,13 @@ def months_until(target: date, today: Optional[date] = None) -> int:
 # ---------------------------------------------------------------------------
 
 def _monthly_accrual_exact(fund: SinkingFund) -> Decimal:
+    # Reserve funds have no accrual cadence (bill_periods_per_year IS NULL by
+    # the discriminator invariant) — they're filled from lump deposits, not a
+    # paycheck stream, and are excluded from the Per-Paycheck Plan upstream.
+    # Return 0 so a caller that serializes a reserve through `monthly_accrual`
+    # gets a sensible display value instead of a NoneType crash.
+    if fund.fund_type == "reserve" or fund.bill_periods_per_year is None:
+        return Decimal("0")
     return Decimal(fund.amount) * Decimal(fund.bill_periods_per_year) / _TWELVE
 
 
@@ -163,6 +170,12 @@ def build_per_paycheck_plan(
     }
 
     for fund in sinking_funds:
+        # Reserves are excluded from the per-paycheck plan by design (they
+        # hold a floor, not an accrual). The funding_source_id check below
+        # would already drop them since reserves can't have one, but the
+        # explicit fund_type guard is defense-in-depth and self-documents.
+        if fund.fund_type == "reserve":
+            continue
         if fund.funding_source_id and fund.funding_source_id in buckets:
             buckets[fund.funding_source_id].append(
                 ("sinking_fund", fund.id, fund.name, _monthly_accrual_exact(fund))
@@ -198,3 +211,125 @@ def build_per_paycheck_plan(
 
     plans.sort(key=lambda p: p.pay_source_name.lower())
     return plans
+
+
+# ---------------------------------------------------------------------------
+# Safe-to-Spend (Reserve Floor follow-up)
+# ---------------------------------------------------------------------------
+#
+# Headline number for the dashboard: cash you can actually touch this minute
+# without dipping into envelopes, goals, or the household cushion.
+#
+# Formula (LOCKED — matches the acceptance fixtures in the work order):
+#
+#     safe_to_spend =
+#         Σ latest-snapshot balance of spendable accounts
+#       − Σ current_balance of ACCRUAL envelopes linked to a spendable account
+#       − Σ current_saved of GOALS linked to a spendable account
+#       − Σ TARGET amount   of RESERVE funds linked to a spendable account
+#
+# The key invariant: reserves subtract their TARGET (`amount`), not their
+# `current_balance`. An unfunded $3,000 cushion still pulls Safe-to-Spend down
+# by the full $3,000 — that's the whole point of a floor. Accrual envelopes
+# and goals subtract only what's actually set aside (current_balance /
+# current_saved), because the unfunded portion is still spendable cash that
+# the per-paycheck plan hasn't claimed yet.
+#
+# Spendable account set resolution (in order):
+#   1. Accounts with `is_spendable = True`.
+#   2. Fallback: the union of `linked_account_id` from sinking_funds (the
+#      household's natural checking/bills account by construction — that's
+#      where envelopes and reserves point at).
+#
+# The fallback is the bootstrap path so a freshly-seeded DB returns a
+# sensible number before anyone flips the flag.
+
+@dataclass(frozen=True)
+class SafeToSpendBreakdown:
+    """Itemised breakdown the dashboard widget can expand."""
+    spendable_balance: Decimal       # Σ latest snapshot balances (quantized)
+    accrual_allocated: Decimal       # Σ accrual current_balance (quantized)
+    goals_allocated: Decimal         # Σ goal current_saved (quantized)
+    reserve_target: Decimal          # Σ reserve amount, NOT current_balance (quantized)
+    safe_to_spend: Decimal           # the headline (may be negative; quantized)
+    spendable_account_ids: list[int]
+    spendable_source: str            # 'explicit' | 'fallback' | 'none'
+
+
+def _resolve_spendable_account_ids(
+    accounts: Iterable, sinking_funds: Iterable[SinkingFund],
+) -> tuple[list[int], str]:
+    """Pick the account set Safe-to-Spend sums balances over.
+
+    Returns (sorted list of ids, source-tag). The fallback uses
+    sinking_funds.linked_account_id because that's where envelopes/reserves
+    point — by construction, the household's natural checking/bills account.
+    """
+    explicit = sorted({
+        a.id for a in accounts
+        if getattr(a, "is_spendable", False) and getattr(a, "is_active", True)
+    })
+    if explicit:
+        return explicit, "explicit"
+    fallback = sorted({
+        f.linked_account_id for f in sinking_funds if f.linked_account_id is not None
+    })
+    if fallback:
+        return fallback, "fallback"
+    return [], "none"
+
+
+def build_safe_to_spend(
+    accounts: Iterable,
+    sinking_funds: Iterable[SinkingFund],
+    goals: Iterable[Goal],
+    latest_snapshot_by_account_id: dict[int, Decimal],
+) -> SafeToSpendBreakdown:
+    """Compute Safe-to-Spend from already-loaded ORM objects + a precomputed
+    {account_id: latest balance} map. Pure — no DB session — so the tests can
+    drive it without staging snapshots through the snapshot endpoint.
+
+    Goals and accrual envelopes only subtract if their `linked_account_id`
+    points at a spendable account (otherwise their funds aren't held in the
+    spendable set and would be double-counted). Reserves apply the same
+    linkage filter on TARGET amount.
+    """
+    accounts = list(accounts)
+    sinking_funds = list(sinking_funds)
+    goals = list(goals)
+
+    spendable_ids, source = _resolve_spendable_account_ids(accounts, sinking_funds)
+    spendable_set = set(spendable_ids)
+
+    spendable_balance = sum(
+        (Decimal(latest_snapshot_by_account_id.get(aid, 0)) for aid in spendable_ids),
+        Decimal("0"),
+    )
+
+    accrual_allocated = sum(
+        (Decimal(f.current_balance) for f in sinking_funds
+         if f.fund_type == "accrual" and f.linked_account_id in spendable_set),
+        Decimal("0"),
+    )
+    reserve_target = sum(
+        (Decimal(f.amount) for f in sinking_funds
+         if f.fund_type == "reserve" and f.linked_account_id in spendable_set),
+        Decimal("0"),
+    )
+    goals_allocated = sum(
+        (Decimal(g.current_saved) for g in goals
+         if g.linked_account_id in spendable_set),
+        Decimal("0"),
+    )
+
+    safe = spendable_balance - accrual_allocated - goals_allocated - reserve_target
+
+    return SafeToSpendBreakdown(
+        spendable_balance=_to_cents(spendable_balance),
+        accrual_allocated=_to_cents(accrual_allocated),
+        goals_allocated=_to_cents(goals_allocated),
+        reserve_target=_to_cents(reserve_target),
+        safe_to_spend=_to_cents(safe),
+        spendable_account_ids=spendable_ids,
+        spendable_source=source,
+    )
