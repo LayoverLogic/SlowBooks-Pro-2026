@@ -52,7 +52,8 @@ from app.models.people import Person, AccountOwnership
 from app.models.statement_imports import StatementImport
 
 # Budgeting (Phase 1, Task 1B): pay sources + sinking funds + goals.
-from app.models.budgeting import PaySource, SinkingFund, Goal, PayCadence
+# FundType added in the Reserve Floor + Safe-to-Spend follow-up.
+from app.models.budgeting import PaySource, SinkingFund, Goal, PayCadence, FundType
 
 __all__ = [
     "Account", "Customer", "Vendor", "Item",
@@ -86,6 +87,6 @@ __all__ = [
     "Person", "AccountOwnership",
     # Phase 2: PDF statement ingestion
     "StatementImport",
-    # Budgeting (Phase 1, Task 1B)
-    "PaySource", "SinkingFund", "Goal", "PayCadence",
+    # Budgeting (Phase 1, Task 1B) + Reserve/Safe-to-Spend follow-up
+    "PaySource", "SinkingFund", "Goal", "PayCadence", "FundType",
 ]

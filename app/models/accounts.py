@@ -66,6 +66,18 @@ class Account(Base):
     # are USD. Defaults USD; the personal-accounts seed sets it explicitly.
     currency = Column(String(3), nullable=False, default="USD", server_default="USD")
 
+    # Reserve Floor / Safe-to-Spend follow-up: explicit flag for the
+    # spendable-account set the Safe-to-Spend calc sums over. Default false
+    # so existing accounts opt in deliberately — sweeping every asset
+    # account into "spendable" would include savings, retirement, etc.
+    # If NO account is flagged spendable, /api/budget/safe-to-spend falls
+    # back to the union of `linked_account_id` from sinking_funds (where
+    # envelopes/reserves point at), which is the household's natural
+    # checking/bills account by construction.
+    is_spendable = Column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
