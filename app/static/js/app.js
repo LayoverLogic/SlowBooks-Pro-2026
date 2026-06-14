@@ -63,6 +63,10 @@ const App = {
         '/categorize':    { page: 'categorize',      label: 'Categorize',         render: () => CategorizePage.render() },
         // Phase 3 — spending analytics (monthly trend + category breakdown).
         '/spending':      { page: 'spending',        label: 'Spending',           render: () => SpendingPage.render() },
+        // Budgeting (Phase 1, Task 1B) — goals + sinking funds. Pay sources
+        // are managed inline from the Goals page (no dedicated nav entry).
+        '/goals':         { page: 'goals',           label: 'Savings Goals',      render: () => GoalsPage.render() },
+        '/sinking-funds': { page: 'sinking-funds',   label: 'Sinking Funds',      render: () => SinkingFundsPage.render() },
     },
 
     async navigate(hash) {
@@ -514,7 +518,8 @@ const App = {
                     </div>`;
             }
 
-            // Monthly Revenue Trend
+            // Monthly Income Trend — sums GL income-account credits, not
+            // invoiced revenue (the underlying endpoint reads the ledger).
             if (charts.monthly_revenue && charts.monthly_revenue.length > 0) {
                 const maxRev = Math.max(...charts.monthly_revenue.map(m => m.amount), 1);
                 const bars = charts.monthly_revenue.map(m => {
@@ -529,11 +534,19 @@ const App = {
                 }).join('');
                 chartsHtml += `
                     <div class="dashboard-section">
-                        <h3>Monthly Revenue (Last 12 Months)</h3>
+                        <h3>Monthly Income (Last 12 Months)</h3>
                         <div style="display:flex; gap:2px; align-items:flex-end;">${bars}</div>
                     </div>`;
             }
         } catch (e) { /* charts endpoint not available yet — that's fine */ }
+
+        // Per-Paycheck Plan widget (Phase 1, Task 1B). The helper hides
+        // itself if every earner has zero set-aside — no noise until the
+        // household has actually configured goals/funds.
+        let perPaycheckHtml = '';
+        try {
+            perPaycheckHtml = await BudgetingDashboard.renderPerPaycheckPlan();
+        } catch (e) { /* budgeting endpoint not present yet — silent fallback */ }
 
         return `
             <div class="page-header">
@@ -568,6 +581,8 @@ const App = {
             </div>
 
             ${chartsHtml}
+
+            ${perPaycheckHtml}
 
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
                 <div class="dashboard-section">
