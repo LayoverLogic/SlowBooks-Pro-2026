@@ -67,6 +67,10 @@ const App = {
         // are managed inline from the Goals page (no dedicated nav entry).
         '/goals':         { page: 'goals',           label: 'Savings Goals',      render: () => GoalsPage.render() },
         '/sinking-funds': { page: 'sinking-funds',   label: 'Sinking Funds',      render: () => SinkingFundsPage.render() },
+        // Monarch-style budget dashboard (additive). cabin: true — the page
+        // builds its own chrome (.bd-root provides the gutter + warm canvas),
+        // so the router skips the legacy .sb-page-pad wrapper.
+        '/budget':        { page: 'budget',          label: 'Budget',             cabin: true, render: () => BudgetDashboardPage.render() },
     },
 
     async navigate(hash) {
