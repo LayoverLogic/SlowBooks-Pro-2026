@@ -331,8 +331,9 @@ const InlineCreate = {
         // For items, fetch the income/expense accounts before rendering.
         let accountOpts = '';
         if (entityType === 'item') {
-            const accts = await API.get('/accounts?account_types=income,expense');
-            accountOpts = accts.map(a =>
+            const accts = await API.get('/accounts');
+            const income = accts.filter(a => ['income','cogs'].includes(a.account_type));
+            accountOpts = income.map(a =>
                 `<option value="${a.id}">${escapeHtml(a.account_number)} - ${escapeHtml(a.name)}</option>`
             ).join('');
         }
